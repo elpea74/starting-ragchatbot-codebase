@@ -1,0 +1,324 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>RAG Query Flow Diagram</title>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    background: #0f172a;
+    color: #e2e8f0;
+    min-height: 100vh;
+    padding: 2rem;
+  }
+  h1 {
+    text-align: center;
+    font-size: 1.6rem;
+    margin-bottom: 0.5rem;
+    color: #f1f5f9;
+  }
+  .subtitle {
+    text-align: center;
+    color: #94a3b8;
+    font-size: 0.9rem;
+    margin-bottom: 2rem;
+  }
+  .diagram-container {
+    background: #1e293b;
+    border: 1px solid #334155;
+    border-radius: 12px;
+    padding: 2rem;
+    margin-bottom: 2rem;
+    overflow-x: auto;
+  }
+  .section-title {
+    font-size: 1.1rem;
+    color: #60a5fa;
+    margin-bottom: 1rem;
+    padding-bottom: 0.5rem;
+    border-bottom: 1px solid #334155;
+  }
+  .legend {
+    display: flex;
+    gap: 1.5rem;
+    flex-wrap: wrap;
+    justify-content: center;
+    margin-bottom: 2rem;
+  }
+  .legend-item {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    font-size: 0.85rem;
+    color: #94a3b8;
+  }
+  .legend-color {
+    width: 16px;
+    height: 16px;
+    border-radius: 4px;
+  }
+  .note {
+    text-align: center;
+    color: #64748b;
+    font-size: 0.8rem;
+    margin-top: 1rem;
+  }
+</style>
+</head>
+<body>
+
+<h1>Course Materials RAG System — Query Flow</h1>
+<p class="subtitle">End-to-end request lifecycle from user input to AI-generated response</p>
+
+<div class="legend">
+  <div class="legend-item"><div class="legend-color" style="background:#2563eb;"></div>Frontend (Browser)</div>
+  <div class="legend-item"><div class="legend-color" style="background:#059669;"></div>FastAPI Server</div>
+  <div class="legend-item"><div class="legend-color" style="background:#7c3aed;"></div>RAG Pipeline</div>
+  <div class="legend-item"><div class="legend-color" style="background:#d97706;"></div>AI / LLM</div>
+  <div class="legend-item"><div class="legend-color" style="background:#dc2626;"></div>Vector Store</div>
+</div>
+
+<div class="diagram-container">
+  <div class="section-title">🔄 Main Query Sequence</div>
+  <div class="mermaid">
+sequenceDiagram
+    autonumber
+    actor User
+    participant FE as Frontend<br/>(script.js)
+    participant API as FastAPI<br/>(app.py)
+    participant RAG as RAG System<br/>(rag_system.py)
+    participant SM as Session Manager<br/>(session_manager.py)
+    participant AI as AI Generator<br/>(ai_generator.py)
+    participant Anthropic as Anthropic API<br/>(Claude)
+    participant TM as Tool Manager<br/>(search_tools.py)
+    participant VS as Vector Store<br/>(vector_store.py)
+    participant CDB as ChromaDB
+
+    User->>FE: Types query & presses Enter
+    activate FE
+    FE->>FE: addMessage() — render user bubble
+    FE->>FE: createLoadingMessage() — spinner
+    FE->>API: POST /api/query {query, session_id}
+    deactivate FE
+
+    activate API
+    API->>API: Validate QueryRequest (Pydantic)
+    alt no session_id
+        API->>RAG: session_manager.create_session()
+        RAG-->>API: session_id = "session_N"
+    end
+    API->>RAG: rag_system.query(query, session_id)
+    deactivate API
+
+    activate RAG
+    RAG->>SM: get_conversation_history(session_id)
+    SM-->>RAG: formatted history or null
+
+    RAG->>AI: generate_response(query, history, tools, tool_manager)
+    deactivate RAG
+
+    activate AI
+    AI->>AI: Build system prompt + history
+    AI->>Anthropic: messages.create()<br/>{system, messages, tools, tool_choice: auto}
+    deactivate AI
+
+    activate Anthropic
+    Anthropic-->>AI: Response {stop_reason, content}
+    deactivate Anthropic
+
+    activate AI
+    alt stop_reason == "end_turn"
+        AI-->>RAG: response.text (direct answer)
+    else stop_reason == "tool_use"
+        AI->>AI: _handle_tool_execution()
+        loop for each tool_use block
+            AI->>TM: execute_tool("search_course_content", query, ...)
+            activate TM
+            TM->>VS: search(query, course_name?, lesson_number?)
+            activate VS
+            VS->>VS: _resolve_course_name() if needed
+            VS->>CDB: course_catalog.query() — resolve course
+            VS->>CDB: course_content.query() — semantic search
+            CDB-->>VS: SearchResults {docs, metadata, distances}
+            VS-->>TM: SearchResults
+            deactivate VS
+            TM->>TM: _format_results() — format chunks + extract sources
+            TM-->>AI: formatted string + last_sources
+            deactivate TM
+        end
+        AI->>Anthropic: messages.create()<br/>{messages + tool_results, system}
+        activate Anthropic
+        Anthropic-->>AI: Final response text
+        deactivate Anthropic
+        AI-->>RAG: response.text (synthesized answer)
+    end
+    deactivate AI
+
+    activate RAG
+    RAG->>TM: get_last_sources()
+    TM-->>RAG: ["Course A - Lesson 3", ...]
+    RAG->>TM: reset_sources()
+    RAG->>SM: add_exchange(session_id, query, response)
+    RAG-->>API: (response, sources)
+    deactivate RAG
+
+    activate API
+    API-->>FE: JSON {answer, sources, session_id}
+    deactivate API
+
+    activate FE
+    FE->>FE: Remove loading spinner
+    FE->>FE: addMessage(answer, 'assistant', sources)<br/>marked.parse() for markdown
+    FE->>FE: Re-enable input, refocus
+    FE-->>User: Displayed response with collapsible Sources
+    deactivate FE
+  </div>
+</div>
+
+<div class="diagram-container">
+  <div class="section-title">📦 Component Architecture</div>
+  <div class="mermaid">
+flowchart TD
+    subgraph Browser["🌐 Browser (Frontend)"]
+        HTML["index.html<br/>Chat UI + Input"]
+        JS["script.js<br/>Event handlers, fetch, DOM"]
+        HTML --> JS
+    end
+
+    subgraph Server["⚙️ Python Backend (FastAPI)"]
+        APP["app.py<br/>Routes + Startup Loader"]
+        CONFIG["config.py<br/>Settings + Env Vars"]
+        MODELS["models.py<br/>Course, Lesson, CourseChunk"]
+    end
+
+    subgraph RAG["🧠 RAG Pipeline"]
+        RAG_SYS["rag_system.py<br/>Orchestrator"]
+        SM["session_manager.py<br/>Conversation history"]
+        AI_GEN["ai_generator.py<br/>Claude API client"]
+        SEARCH["search_tools.py<br/>Tool definitions + execution"]
+        VECTOR["vector_store.py<br/>ChromaDB wrapper"]
+        DOC_PROC["document_processor.py<br/>File parsing + chunking"]
+    end
+
+    subgraph External["☁️ External Services"]
+        ANTHROPIC["Anthropic API<br/>Claude Sonnet 4"]
+        CHROMADB[("ChromaDB<br/>Persistent Vector Store")]
+        EMBED["Sentence Transformers<br/>all-MiniLM-L6-v2"]
+    end
+
+    JS -->|"POST /api/query"| APP
+    JS -->|"GET /api/courses"| APP
+    APP --> CONFIG
+    APP --> RAG_SYS
+    APP -->|"startup"| DOC_PROC
+    DOC_PROC -->|"Course + Chunks"| VECTOR
+    RAG_SYS --> SM
+    RAG_SYS --> AI_GEN
+    RAG_SYS --> SEARCH
+    SEARCH --> VECTOR
+    VECTOR --> EMBED
+    VECTOR --> CHROMADB
+    AI_GEN -->|"API calls"| ANTHROPIC
+    MODELS --> RAG_SYS
+  </div>
+</div>
+
+<div class="diagram-container">
+  <div class="section-title">🔍 Document Ingestion (Startup)</div>
+  <div class="mermaid">
+flowchart LR
+    subgraph Input["📄 Input Files"]
+        DOCS["docs/*.txt<br/>Course documents"]
+    end
+
+    subgraph Processing["⚙️ Processing Pipeline"]
+        READ["Read file<br/>UTF-8 encoding"]
+        PARSE["Parse metadata<br/>Title, Link, Instructor"]
+        LESSON["Split into lessons<br/>Lesson N: Title"]
+        CHUNK["chunk_text()<br/>Sentence-based<br/>800 chars + 100 overlap"]
+    end
+
+    subgraph Storage["💾 Vector Storage"]
+        CATALOG[("course_catalog<br/>Course metadata")]
+        CONTENT[("course_content<br/>Chunk embeddings")]
+    end
+
+    DOCS --> READ
+    READ --> PARSE
+    PARSE --> LESSON
+    LESSON --> CHUNK
+    CHUNK -->|"add_course_metadata()"| CATALOG
+    CHUNK -->|"add_course_content()"| CONTENT
+  </div>
+</div>
+
+<div class="diagram-container">
+  <div class="section-title">🔀 Decision Logic: Tool Use vs Direct Answer</div>
+  <div class="mermaid">
+flowchart TD
+    Q["User Query Received"] --> CLAUDE["Claude API<br/>tool_choice: auto"]
+    CLAUDE --> DECISION{"stop_reason?"}
+
+    DECISION -->|"end_turn"| DIRECT["Direct answer from<br/>parametric knowledge"]
+    DECISION -->|"tool_use"| TOOL["Claude calls<br/>search_course_content"]
+
+    TOOL --> SEARCH["Vector search<br/>in ChromaDB"]
+    SEARCH --> RESULTS["Top-5 semantic<br/>chunk matches"]
+    RESULTS --> FORMAT["Format results<br/>+ extract sources"]
+    FORMAT --> SECOND["Second Claude call<br/>with tool results"]
+    SECOND --> SYNTHESIS["Synthesized answer<br/>grounded in course content"]
+
+    DIRECT --> RETURN["Return response"]
+    SYNTHESIS --> RETURN
+  </div>
+</div>
+
+<p class="note">Generated for the Course Materials RAG System — starting-ragchatbot-codebase</p>
+
+<script>
+  mermaid.initialize({
+    startOnLoad: true,
+    theme: 'dark',
+    sequence: {
+      diagramMarginX: 40,
+      diagramMarginY: 20,
+      actorMargin: 60,
+      width: 160,
+      height: 40,
+      boxMargin: 10,
+      boxTextMargin: 5,
+      noteMargin: 10,
+      messageMargin: 35,
+      mirrorActors: true,
+      bottomMarginAdj: 1,
+      useMaxWidth: true,
+      rightAngles: false,
+      showSequenceNumbers: true
+    },
+    flowchart: {
+      useMaxWidth: true,
+      htmlLabels: true,
+      curve: 'basis'
+    },
+    themeVariables: {
+      primaryColor: '#2563eb',
+      primaryTextColor: '#fff',
+      primaryBorderColor: '#1d4ed8',
+      lineColor: '#94a3b8',
+      secondaryColor: '#334155',
+      tertiaryColor: '#1e293b',
+      background: '#1e293b',
+      mainBkg: '#1e293b',
+      nodeBorder: '#475569',
+      clusterBkg: '#0f172a',
+      titleColor: '#f1f5f9',
+      edgeLabelBackground: '#334155',
+      fontfamily: '-apple-system, BlinkMacSystemFont, Segoe UI, Roboto, sans-serif'
+    }
+  });
+</script>
+</body>
+</html>
